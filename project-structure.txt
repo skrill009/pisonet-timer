@@ -1,0 +1,23 @@
+coin_timer/
+  app/
+    main.py
+    config.py
+    timer_manager.py
+    serial_listener.py
+    network.py
+    shutdown.py
+    utils.py
+    ui/
+      timer_window.py
+      overlay.py
+      settings_modal.py
+  admin/
+    admin_cli.py
+  assets/
+    overlay_default.png
+    animation.gif
+  data/
+    settings.json
+    state.json
+  requirements.txt
+  README.md
