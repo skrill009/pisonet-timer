@@ -7,11 +7,16 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'child_confi
 
 DEFAULTS = {
     # Identity
+    "app_name":           "Grefin Timer",
     "pc_name":            "PC-01",
     "shop_name":          "PC Cafe",
     # Admin
     "admin_keyword":      "grefin",
-    "admin_password":     "admin",    # Networking
+    "admin_password":     "admin",
+    # Branding
+    "logo_path":          os.path.join(os.path.dirname(__file__), '..', 'assets', 'logo.png'),
+    "logo_taskbar_path":  os.path.join(os.path.dirname(__file__), '..', 'assets', 'logo_taskbar.png'),
+    # Networking
     "server_port":        9000,
     "standalone":         True,
     "parent_ip":          "",
@@ -38,6 +43,16 @@ DEFAULTS = {
     "disable_signout": False,
     "disable_task_view": False,
     "watchdog_reboot_enabled": True,
+    # Sound options
+    "voice_file_30s": os.path.join(os.path.dirname(__file__), '..', 'assets', 'no_more_time.wav'),
+    # Schedule settings
+    "schedule_enabled": False,
+    "opening_hours": "09:00",
+    "closing_hours": "23:00",
+    "warning_time": "30:00",  # 30 minutes before closing
+    "warning_message": "⚠ Shop is closing soon!",  # This is overridden by timer manager with closing time
+    "closing_message": "Sorry, we are now closed!",
+    "closing_logo_path": os.path.join(os.path.dirname(__file__), '..', 'assets', 'closing_logo.jpg'),
 }
 
 def load() -> dict:

@@ -7,10 +7,10 @@ import subprocess, sys, os
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QApplication, QDialog, QLineEdit, QFormLayout, QMessageBox,
-    QStackedWidget, QStackedLayout, QSizePolicy
+    QStackedWidget, QStackedLayout, QSizePolicy, QFrame, QStyle,
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl
-from PyQt5.QtGui import QFont, QPixmap, QMovie, QPainter, QColor, QPalette, QImage
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl, QSize
+from PyQt5.QtGui import QFont, QPixmap, QMovie, QPainter, QColor, QPalette, QImage, QFontMetrics
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 
@@ -201,6 +201,11 @@ class LoginDialog(QDialog):
             return
         ok, msg = register_user(username, password, self.db_path)
         if ok:
+            msg_box = QMessageBox()
+            msg_box.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+            msg_box.setWindowTitle("Registration Successful")
+            msg_box.setText(f"Account '{username}' created successfully!\nYou can now log in.")
+            msg_box.exec_()
             self.register_success.emit(username)
             self.accept()
         else:
@@ -228,6 +233,8 @@ class FullscreenOverlay(QWidget):
     timer_add_time  = pyqtSignal(int)
     timer_stop      = pyqtSignal()
     timer_reset     = pyqtSignal()
+    timer_run       = pyqtSignal()
+    logout_requested = pyqtSignal()
 
     _DEFAULT_WALLPAPER = os.path.normpath(
         os.path.join(os.path.dirname(__file__), '..', '..', 'assets',
@@ -240,6 +247,8 @@ class FullscreenOverlay(QWidget):
                  parent_ip: str = "",
                  parent_port: int = 9000,
                  config: dict = None,
+                 app_name: str = "Grefin Timer",
+                 logo_path: str = "",
                  parent=None):
         super().__init__(parent)
         self.pc_name             = pc_name
@@ -251,8 +260,12 @@ class FullscreenOverlay(QWidget):
         self.parent_ip           = parent_ip
         self.parent_port         = parent_port
         self._config             = config or {}
+        self.app_name            = app_name
+        self.logo_path           = logo_path
         self._background_type    = (config or {}).get("background_type", "Live Wallpaper")
         self._background_path    = (config or {}).get("background_path", "")
+        self._closing_logo_path  = (config or {}).get("closing_logo_path", "")
+        self._animation_path     = (config or {}).get("animation_path", "")  # Store for later reset
 
         self._player      = None   # QMediaPlayer for video
         self._gif_movie   = None   # QMovie for gif background
@@ -266,6 +279,15 @@ class FullscreenOverlay(QWidget):
         self._shop_anim_step = 0
         self._shop_full_text = shop_name
         self._shop_display_text = shop_name
+
+        # Timer manager reference (set later via set_timer_manager)
+        self._timer_manager = None
+        
+        # Shop status check timer (every 5 seconds check if shop is closed)
+        self._shop_status_timer = QTimer(self)
+        self._shop_status_timer.timeout.connect(self._check_shop_status)
+        self._shop_status_timer.start(5000)  # Check every 5 seconds
+        self._shop_closed_shown = False  # Track if we've already shown the closing screen
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.SplashScreen)
         # In Windows, this removes taskbar entry; still can't prevent Task Manager kill.
@@ -348,10 +370,32 @@ class FullscreenOverlay(QWidget):
         self._admin_btn.clicked.connect(self._on_admin_clicked)
         top_bar.addWidget(self._admin_btn)
 
+        # Schedule warning banner — positioned at top
+        self._fullscreen_warning_label = QLabel("")
+        self._fullscreen_warning_label.setFont(QFont("Segoe UI", 22, QFont.Bold))
+        self._fullscreen_warning_label.setStyleSheet(
+            "background:rgba(255, 140, 0, 240); color:#000; padding:20px; "
+            "border-radius:0px; font-weight:bold; text-align:center;")
+        self._fullscreen_warning_label.setAlignment(Qt.AlignCenter)
+        self._fullscreen_warning_label.setWordWrap(True)
+        self._fullscreen_warning_label.setMinimumHeight(80)
+        self._fullscreen_warning_label.hide()
+
+        root.addLayout(top_bar)
+        root.addWidget(self._fullscreen_warning_label)
+
         # Center
         center = QVBoxLayout()
         center.setAlignment(Qt.AlignCenter)
         center.setSpacing(16)
+
+        # App logo if available
+        if self.logo_path and os.path.exists(self.logo_path):
+            logo_label = QLabel(self)
+            logo_pix = QPixmap(self.logo_path).scaledToHeight(120, Qt.SmoothTransformation)
+            logo_label.setPixmap(logo_pix)
+            logo_label.setAlignment(Qt.AlignCenter)
+            center.addWidget(logo_label)
 
         self._shop_label = QLabel(self.shop_name)
         self._shop_label.setFont(QFont("Segoe UI", 34, QFont.Bold))
@@ -365,10 +409,10 @@ class FullscreenOverlay(QWidget):
             "color:#aaa; font-size:13px; background:transparent;")
         self._anim_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
-        insert_label = QLabel("Insert Coin")
-        insert_label.setFont(QFont("Segoe UI", 52, QFont.Bold))
-        insert_label.setStyleSheet("color:#f0c040; letter-spacing:4px; background:transparent;")
-        insert_label.setAlignment(Qt.AlignCenter)
+        self._insert_coin_label = QLabel("Insert Coin")
+        self._insert_coin_label.setFont(QFont("Segoe UI", 52, QFont.Bold))
+        self._insert_coin_label.setStyleSheet("color:#f0c040; letter-spacing:4px; background:transparent;")
+        self._insert_coin_label.setAlignment(Qt.AlignCenter)
 
         self._shutdown_label = QLabel("")
         self._shutdown_label.setFont(QFont("Segoe UI", 16))
@@ -384,7 +428,7 @@ class FullscreenOverlay(QWidget):
 
         center.addWidget(self._shop_label)
         center.addWidget(self._anim_label, alignment=Qt.AlignCenter)
-        center.addWidget(insert_label)
+        center.addWidget(self._insert_coin_label)
         center.addWidget(self._shutdown_label)
         center.addWidget(self._com_status_label, alignment=Qt.AlignCenter)
 
@@ -411,11 +455,22 @@ class FullscreenOverlay(QWidget):
             "font-size:14px; font-weight:bold;")
         self._login_btn.clicked.connect(self._on_login_clicked)
 
+        self._logged_in_label = QLabel("")
+        self._logged_in_label.setStyleSheet("color:#7fff7f; font-size:13px; font-weight:bold; background:transparent;")
+        self._logged_in_label.hide()
+
+        self._logout_btn = QPushButton("Log Out")
+        self._logout_btn.setFixedSize(130, 42)
+        self._logout_btn.setStyleSheet("background:rgba(80,20,20,200); color:#ffaaaa; border-radius:8px; font-size:13px; font-weight:bold;")
+        self._logout_btn.clicked.connect(self._on_logout_clicked)
+        self._logout_btn.hide()
+
         bottom_bar.addWidget(self._shutdown_btn, alignment=Qt.AlignBottom)
         bottom_bar.addStretch()
+        bottom_bar.addWidget(self._logged_in_label, alignment=Qt.AlignBottom)
+        bottom_bar.addWidget(self._logout_btn, alignment=Qt.AlignBottom)
         bottom_bar.addWidget(self._login_btn, alignment=Qt.AlignBottom)
 
-        root.addLayout(top_bar)
         root.addLayout(center, stretch=1)
         root.addLayout(bottom_bar)
 
@@ -617,6 +672,7 @@ class FullscreenOverlay(QWidget):
                 self._anim_label.setFixedSize(240, 190)
 
     def set_com_status(self, status: str, ok: bool = True):
+        self._com_status_label.setWordWrap(False)
         self._com_status_label.setText(f"COM Status: {status}")
         if ok:
             self._com_status_label.setStyleSheet(
@@ -624,6 +680,19 @@ class FullscreenOverlay(QWidget):
         else:
             self._com_status_label.setStyleSheet(
                 "color:#ff5555; background:rgba(100, 0, 0, 180); border-radius:10px; padding:6px 14px;")
+
+    def set_com_closing_message(self, message: str):
+        """Show closing / schedule message in the COM area."""
+        self._com_status_label.setWordWrap(True)
+        self._com_status_label.setText(message)
+        self._com_status_label.setStyleSheet(
+            "color:#fff8e1; background:rgba(120, 40, 0, 220); border-radius:10px;"
+            "padding:10px 18px; font-size:15px; font-weight:bold;")
+
+    def show_schedule_warning(self, message: str):
+        """Display a schedule warning message prominently."""
+        self._fullscreen_warning_label.setText(message)
+        self._fullscreen_warning_label.show()
 
     # ── shutdown countdown ───────────────────────────────────────
     def _reset_shutdown(self):
@@ -773,12 +842,13 @@ class FullscreenOverlay(QWidget):
             return
 
         from child.ui.settings_modal import ChildSettingsModal
-        modal = ChildSettingsModal(self._config, db_path=self.db_path)
+        modal = ChildSettingsModal(self._config, db_path=self.db_path, app_name=self.app_name)
         modal.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         modal.settings_saved.connect(self._on_settings_saved)
         modal.timer_add_time.connect(self._on_timer_add_time)
         modal.timer_stop.connect(self._on_timer_stop)
         modal.timer_reset.connect(self._on_timer_reset)
+        modal.timer_run.connect(self._on_timer_run)
         modal.exec_()
 
         self.reset_shutdown()
@@ -793,6 +863,7 @@ class FullscreenOverlay(QWidget):
         self._background_type = new_cfg.get("background_type", self._background_type)
         self._background_path = new_cfg.get("background_path", self._background_path)
         self.dev_mode         = bool(new_cfg.get("dev_mode", self.dev_mode))
+        self._closing_logo_path = new_cfg.get("closing_logo_path", self._closing_logo_path)
 
         # Update shop animation settings
         self._shop_animation_type = new_cfg.get("shop_animation", "None")
@@ -816,20 +887,108 @@ class FullscreenOverlay(QWidget):
     def _on_timer_reset(self):
         self.timer_reset.emit()
 
+    def _on_timer_run(self):
+        self.timer_run.emit()
+
     # ── login ────────────────────────────────────────────────────
+    def show_logged_in(self, username: str):
+        self._login_btn.hide()
+        self._logged_in_label.setText(f"Logged In:\n{username}")
+        self._logged_in_label.show()
+        self._logout_btn.show()
+
+    def show_logged_out(self):
+        self._logged_in_label.hide()
+        self._logout_btn.hide()
+        self._login_btn.show()
+
+    def _on_logout_clicked(self):
+        self.show_logged_out()
+        self.logout_requested.emit()
+
     def _on_login_clicked(self):
         self._shutdown_timer.stop()
         dlg = LoginDialog(self.db_path, self.pc_name, self.parent_ip, self.parent_port)
         dlg.login_success.connect(self._on_login_result)
-        dlg.register_success.connect(
-            lambda u: QMessageBox.information(None, "Registered",
-                f"Account '{u}' created. You can now log in."))
         dlg.exec_()
         if not self.isHidden():
             self._shutdown_timer.start(1000)
 
     def _on_login_result(self, username: str, seconds: int):
         self.login_success.emit(username, seconds)
+
+    def _default_closing_logo_path(self) -> str:
+        p = (self._closing_logo_path or self._config.get("closing_logo_path") or "").strip()
+        if p and os.path.exists(p):
+            return p
+        fb = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "assets", "closing_logo.jpg"))
+        return fb if os.path.exists(fb) else ""
+
+    def _on_shop_closed(self, closing_message: str, closing_logo_path: str):
+        """Closing message in shop title; logo in the same widget as the center GIF."""
+        self._shop_label.setText(closing_message)
+        self._shop_label.setFont(QFont("Segoe UI", 28, QFont.Bold))
+        self._shop_label.setStyleSheet(
+            "color:#ff6060; background:transparent; padding:20px;"
+        )
+        self._insert_coin_label.hide()
+
+        logo_path = (closing_logo_path or "").strip() or self._default_closing_logo_path()
+        if logo_path and os.path.exists(logo_path):
+            try:
+                m = self._anim_label.movie()
+                if m:
+                    m.stop()
+                self._anim_label.setMovie(None)
+                closing_pix = QPixmap(logo_path).scaledToHeight(220, Qt.SmoothTransformation)
+                if not closing_pix.isNull():
+                    self._anim_label.clear()
+                    self._anim_label.setPixmap(closing_pix)
+                    self._anim_label.setFixedSize(closing_pix.size())
+            except Exception:
+                pass
+
+    def set_timer_manager(self, timer_manager):
+        """Set the timer manager reference for shop status checks."""
+        self._timer_manager = timer_manager
+
+    def _check_shop_status(self):
+        """Periodically check if shop is closed and display closing screen if needed."""
+        if not self._timer_manager:
+            return
+        
+        # Check if shop is currently closed
+        is_open = self._timer_manager.is_shop_open()
+        
+        if not is_open and not self._shop_closed_shown:
+            self._shop_closed_shown = True
+            closing_msg = self._config.get("closing_message", "Sorry, we are now closed!")
+            closing_logo = self._config.get("closing_logo_path", "")
+            self._on_shop_closed(closing_msg, closing_logo)
+            self.set_com_closing_message(closing_msg)
+        
+        elif is_open and self._shop_closed_shown:
+            # Shop opened again - reset the display
+            self._shop_closed_shown = False
+            self._reset_shop_display_from_closing()
+
+    def _reset_shop_display_from_closing(self):
+        """Reset the display back to normal insert coin screen."""
+        self._shop_label.setText(self.shop_name)
+        self._shop_label.setFont(QFont("Segoe UI", 34, QFont.Bold))
+        self._shop_label.setStyleSheet("color:#ffffff; background:transparent;")
+
+        self._insert_coin_label.show()
+
+        if self._animation_path and os.path.exists(self._animation_path):
+            self.set_animation(self._animation_path)
+        else:
+            self._anim_label.setPixmap(QPixmap())
+            self._anim_label.setText("[ Animation ]")
+            self._anim_label.setStyleSheet("color:#aaa; font-size:13px; background:transparent;")
+
+        self.set_com_status("Unknown", True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -848,84 +1007,183 @@ class FullscreenOverlay(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+import sys
+from PyQt5.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, 
+                             QPushButton, QFrame, QApplication, QStyle)
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QSize, QTimer
+from PyQt5.QtGui import QFont, QFontMetrics
+
 class DraggableTimer(QWidget):
     settings_requested = pyqtSignal()
+    save_time_requested = pyqtSignal()
 
-    def __init__(self, pc_name: str, config: dict = None, parent=None):
+    def __init__(self, pc_name: str, config: dict = None, app_name: str = "Grefin Timer", parent=None):
         super().__init__(parent)
-        self.pc_name     = pc_name
-        self._config     = config or {}
-        self._drag_pos   = None
-        self._mini       = False
+        self.pc_name = pc_name
+        self._config = config or {}
+        self.app_name = app_name
+        self._drag_pos = None
+        self._mini = False
         self._drag_moved = False
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.SplashScreen)
-        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
-        self.setWindowFlag(Qt.WindowMinimizeButtonHint, False)
+        self._timer_color = self._config.get("timer_color", "#00e5ff")
+        self._font_size = int(self._config.get("timer_font_size", 26))
+        
+        # Window Setup — no Qt.SplashScreen: it blocks mouse events (dragging) on Windows
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowTitle(f"{self.pc_name} Timer")
+        self.setWindowTitle(f"{self.app_name} — {self.pc_name} Timer")
+        
         self._build_ui()
+        self.apply_timer_config(self._config)
         self._position_default()
 
-
     def _build_ui(self):
-        self.setStyleSheet("background:rgba(13,13,26,210); border-radius:10px;")
-        self.setFixedSize(220, 110)
+        # --- STYLES (Original Cyberpunk Palette) ---
+        self.setStyleSheet(
+            "DraggableTimer { background:qlineargradient(x1:0,y1:0,x2:1,y2:1, "
+            "stop:0 #141428, stop:1 #0a0a18); border-radius:10px; border:1px solid #2a3a55; }"
+        )
 
-        self.time_label = QLabel("00:00:00")
-        self.time_label.setFont(QFont("Segoe UI", 26, QFont.Bold))
-        self.time_label.setStyleSheet("color:#00e5ff;")
-        self.time_label.setAlignment(Qt.AlignCenter)
+        btn_style = (
+            "QPushButton { background:rgba(30,58,95,180); color:#c8e6ff; border:1px solid #3a5a80; "
+            "border-radius:4px; font-size:13px; font-weight:bold; }"
+            "QPushButton:hover { background:rgba(45,78,120,220); }"
+        )
 
-        self.status_label = QLabel(f"{self.pc_name}  |  Coins: 0")
-        self.status_label.setFont(QFont("Segoe UI", 9))
-        self.status_label.setStyleSheet("color:#888;")
-        self.status_label.setAlignment(Qt.AlignCenter)
+        # Border logic to create the "Tiled" look from the image
+        label_base = "border: 1px solid #2a3a55; padding: 4px;"
 
-        self._com_status_label = QLabel("COM: Unknown")
-        self._com_status_label.setFont(QFont("Segoe UI", 8))
-        self._com_status_label.setStyleSheet("color:#aaaaaa;")
-        self._com_status_label.setAlignment(Qt.AlignCenter)
+        # --- ROW 1: HEADER (App Name + Icons) ---
+        self.app_label = QLabel(self.app_name)
+        self.app_label.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        self.app_label.setStyleSheet("color:#7a8aaf; border:none;")
+        
+        self._save_btn = QPushButton()
+        self._save_btn.setToolTip("Save Time")
+        self._save_btn.setFixedSize(28, 24)
+        self._save_btn.setStyleSheet(btn_style)
+        self._save_btn.clicked.connect(lambda: self.save_time_requested.emit())
+        # Load save logo and tint it white so it matches the settings/mini icons
+        save_logo_path = os.path.join(os.path.dirname(__file__), '..', '..', 'assets', 'save_logo.png')
+        if os.path.exists(save_logo_path):
+            from PyQt5.QtGui import QIcon, QImage
+            img = QImage(save_logo_path).convertToFormat(QImage.Format_ARGB32)
+            # Replace all non-transparent pixels with white
+            for y in range(img.height()):
+                for x in range(img.width()):
+                    px = img.pixel(x, y)
+                    alpha = (px >> 24) & 0xFF
+                    if alpha > 0:
+                        img.setPixel(x, y, (alpha << 24) | 0xFFFFFF)
+            self._save_btn.setIcon(QIcon(QPixmap.fromImage(img)))
+            self._save_btn.setIconSize(QSize(16, 16))
+        else:
+            self._save_btn.setText("💾")
 
         self._settings_btn = QPushButton("⚙")
-        self._settings_btn.setFixedSize(28, 28)
-        self._settings_btn.setStyleSheet(
-            "background:transparent; color:#00e5ff; font-size:16px;")
+        self._settings_btn.setFixedSize(28, 24)
+        self._settings_btn.setStyleSheet(btn_style)
         self._settings_btn.clicked.connect(self._on_settings_clicked)
 
-        self._mini_btn = QPushButton("🗕")
-        self._mini_btn.setFixedSize(28, 28)
-        self._mini_btn.setStyleSheet(
-            "background:transparent; color:#00e5ff; font-size:16px;")
+        self._mini_btn = QPushButton("—")
+        self._mini_btn.setFixedSize(28, 24)
+        self._mini_btn.setStyleSheet(btn_style)
         self._mini_btn.clicked.connect(self._go_mini)
 
-        top = QHBoxLayout()
-        top.addStretch()
-        top.addWidget(self._settings_btn)
-        top.addWidget(self._mini_btn)
-        top.setContentsMargins(0, 4, 4, 0)
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(8, 4, 8, 4)
+        top_layout.addWidget(self.app_label)
+        top_layout.addStretch()
+        top_layout.addWidget(self._save_btn)
+        top_layout.addWidget(self._settings_btn)
+        top_layout.addWidget(self._mini_btn)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 0, 8, 8)
-        layout.addLayout(top)
-        layout.addWidget(self.time_label)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self._com_status_label)
+        # --- ROW 2: USERNAME ---
+        self._user_label = QLabel("Logged in: ---")
+        self._user_label.setFont(QFont("Segoe UI", 9))
+        self._user_label.setStyleSheet(f"color:#93c5fd; background:rgba(0,0,0,0.2); {label_base} border-left:none; border-right:none;")
+        self._user_label.setAlignment(Qt.AlignCenter)
 
-    # ── public ───────────────────────────────────────────────────
+        # --- ROW 3: TIMER ---
+        self._time_frame = QFrame()
+        self._time_frame.setStyleSheet("background:rgba(8,12,28,150); border-top: 1px solid #2d3f66; border-bottom: 1px solid #2d3f66;")
+        self.time_label = QLabel("00:00:00")
+        self.time_label.setAlignment(Qt.AlignCenter)
+        tf_lay = QVBoxLayout(self._time_frame)
+        tf_lay.setContentsMargins(0, 8, 0, 8)
+        tf_lay.addWidget(self.time_label)
+
+        # --- ROW 4: PC NAME & COINS (Split Row) ---
+        self._pc_label = QLabel(self.pc_name)
+        self._pc_label.setAlignment(Qt.AlignCenter)
+        self._pc_label.setStyleSheet(f"color:#9aa3b8; {label_base} border-left:none; border-top:none;")
+        
+        self._coins_label = QLabel("Coins: 0")
+        self._coins_label.setAlignment(Qt.AlignCenter)
+        self._coins_label.setStyleSheet(f"color:#9aa3b8; {label_base} border-left:none; border-right:none; border-top:none;")
+        
+        info_row = QHBoxLayout()
+        info_row.setSpacing(0)
+        info_row.addWidget(self._pc_label, 1)
+        info_row.addWidget(self._coins_label, 1)
+
+        # --- ROW 5: COM STATUS ---
+        self._com_status_label = QLabel("COM: Unknown")
+        self._com_status_label.setFont(QFont("Segoe UI", 8))
+        self._com_status_label.setStyleSheet(f"color:#b8c0d4; {label_base} border:none;")
+        self._com_status_label.setAlignment(Qt.AlignCenter)
+
+        # --- MAIN PANEL ASSEMBLY ---
+        self._full_panel = QWidget()
+        fp_lay = QVBoxLayout(self._full_panel)
+        fp_lay.setContentsMargins(0, 0, 0, 0)
+        fp_lay.setSpacing(0)
+        
+        fp_lay.addLayout(top_layout)
+        fp_lay.addWidget(self._user_label)
+        fp_lay.addWidget(self._time_frame)
+        fp_lay.addLayout(info_row)
+        fp_lay.addWidget(self._com_status_label)
+
+        # --- MINI PANEL ---
+        self._time_mini = QLabel("00:00:00")
+        self._time_mini.setAlignment(Qt.AlignCenter)
+        self._mini_panel = QWidget()
+        mp_lay = QVBoxLayout(self._mini_panel)
+        mp_lay.setContentsMargins(10, 2, 10, 2)
+        mp_lay.addWidget(self._time_mini)
+        self._mini_panel.hide()
+
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.addWidget(self._full_panel)
+        self._root_layout.addWidget(self._mini_panel)
+
+    def apply_timer_config(self, config: dict):
+        self._config = config
+        self._font_size = int(config.get("timer_font_size", 24))
+        self._timer_color = config.get("timer_color", "#00e5ff")
+        
+        font = QFont("Segoe UI", self._font_size, QFont.Bold)
+        self.time_label.setFont(font)
+        self.time_label.setStyleSheet(f"color:{self._timer_color}; border:none; background:transparent;")
+        
+        if not self._mini:
+            self.setFixedSize(260, 160)
+
     def update_time(self, time_str: str):
         self.time_label.setText(time_str)
-        self.setWindowTitle(f"{self.pc_name} Timer  |  {time_str}")
+        self._time_mini.setText(time_str)
 
     def update_status(self, coins: int, username: str = ""):
-        user_part = f"  [{username}]" if username else ""
-        self.status_label.setText(f"{self.pc_name}{user_part}  |  Coins: {coins}")
+        if username:
+            self._user_label.setText(f"Logged in: {username}")
+        self._coins_label.setText(f"Coins: {coins}")
 
     def set_com_status(self, status: str, ok: bool = True):
         self._com_status_label.setText(f"COM: {status}")
-        if ok:
-            self._com_status_label.setStyleSheet("color:#00ff00;")
-        else:
-            self._com_status_label.setStyleSheet("color:#ff5555;")
+        color = "#6ee7b7" if ok else "#f87171"
+        self._com_status_label.setStyleSheet(f"color:{color}; padding:4px; border:none;")
 
     def start_blink(self):
         if not hasattr(self, '_blink_timer') or not self._blink_timer.isActive():
@@ -937,67 +1195,71 @@ class DraggableTimer(QWidget):
     def stop_blink(self):
         if hasattr(self, '_blink_timer'):
             self._blink_timer.stop()
-        self.time_label.setStyleSheet("color:#00e5ff;")
+        self.time_label.setStyleSheet(
+            f"color:{self._timer_color}; border:none; background:transparent;")
 
-    # ── settings requested from draggable timer ───────────────────────
+    def _blink(self):
+        self._blink_state = not getattr(self, '_blink_state', False)
+        color = "#ff4444" if self._blink_state else self._timer_color
+        self.time_label.setStyleSheet(f"color:{color}; border:none; background:transparent;")
+
+    def show_schedule_warning(self, message: str):
+        """Show a brief on-top warning popup from the timer widget."""
+        box = QMessageBox()
+        box.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        box.setWindowTitle("Schedule Warning")
+        box.setText(message)
+        box.exec_()
+
     def _on_settings_clicked(self):
-        # Password challenge is handled by the main overlay (_on_admin_clicked)
-        # to avoid double prompts when triggered from draggable and overlay.
         self.settings_requested.emit()
 
-    # ── mini mode ────────────────────────────────────────────────
     def _go_mini(self):
-        if self._mini:
-            return
+        if self._mini: return
         self._mini = True
-        self.setFixedSize(160, 32)
-        self.setStyleSheet("background:rgba(13,13,26,200); border-radius:8px;")
-        self.status_label.hide()
-        self._settings_btn.hide()
-        self._mini_btn.hide()
-        self.time_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        self._full_panel.hide()
+        self._mini_panel.show()
+        mf = QFont("Segoe UI", 16, QFont.Bold)
+        self._time_mini.setFont(mf)
+        self._time_mini.setStyleSheet(f"color:{self._timer_color};")
+        self.setFixedSize(180, 40)
+        self.setStyleSheet("DraggableTimer { background:#12121c; border-radius:8px; border:1px solid #334; }")
+        
+        # Center at top
         screen = QApplication.primaryScreen().availableGeometry()
-        self.move((screen.width() - 160) // 2, 0)
+        self.move((screen.width() - self.width()) // 2, 5)
 
     def _go_normal(self):
-        if not self._mini:
-            return
+        if not self._mini: return
         self._mini = False
-        self.setFixedSize(220, 110)
-        self.setStyleSheet("background:rgba(13,13,26,210); border-radius:10px;")
-        self.status_label.show()
-        self._settings_btn.show()
-        self._mini_btn.show()
-        self.time_label.setFont(QFont("Segoe UI", 26, QFont.Bold))
+        self._mini_panel.hide()
+        self._full_panel.show()
+        self.apply_timer_config(self._config)
+        self.setStyleSheet(
+            "DraggableTimer { background:qlineargradient(x1:0,y1:0,x2:1,y2:1, "
+            "stop:0 #141428, stop:1 #0a0a18); border-radius:10px; border:1px solid #2a3a55; }"
+        )
         self._position_default()
 
     def _position_default(self):
         screen = QApplication.primaryScreen().availableGeometry()
-        self.move(screen.width() - 230, screen.height() - 120)
+        self.move(screen.width() - self.width() - 20, screen.height() - self.height() - 40)
 
-    # ── mouse events ─────────────────────────────────────────────
+    # --- Interaction Logic ---
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self._drag_pos   = e.globalPos() - self.frameGeometry().topLeft()
+            self._drag_pos = e.globalPos() - self.frameGeometry().topLeft()
             self._drag_moved = False
 
     def mouseMoveEvent(self, e):
-        if e.buttons() == Qt.LeftButton and self._drag_pos and not self._mini:
+        if e.buttons() == Qt.LeftButton and self._drag_pos is not None:
             self._drag_moved = True
             self.move(e.globalPos() - self._drag_pos)
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            if self._mini and not self._drag_moved:
-                self._go_normal()
-        self._drag_pos   = None
-        self._drag_moved = False
-
-    # ── blink ────────────────────────────────────────────────────
-    def _blink(self):
-        self._blink_state = not self._blink_state
-        self.time_label.setStyleSheet(
-            f"color:{'#ff4444' if self._blink_state else '#00e5ff'};")
+        if e.button() == Qt.LeftButton and self._mini and not self._drag_moved:
+            self._go_normal()
+        self._drag_pos = None
 
     def closeEvent(self, e):
         e.ignore()

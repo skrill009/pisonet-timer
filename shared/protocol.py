@@ -11,6 +11,7 @@ CMD_END_SESSION   = "END_SESSION"   # {"cmd":"END_SESSION"}
 CMD_GET_STATUS    = "GET_STATUS"    # {"cmd":"GET_STATUS"}
 CMD_SHUTDOWN      = "SHUTDOWN"      # {"cmd":"SHUTDOWN"}
 CMD_SEND_MESSAGE  = "SEND_MESSAGE"  # {"cmd":"SEND_MESSAGE","message":str,"title":str}
+CMD_SET_SCHEDULE  = "SET_SCHEDULE"  # {"cmd":"SET_SCHEDULE","enabled":bool,"opening_hours":str,"closing_hours":str,"warning_minutes":int,"warning_message":str}
 
 # Commands child -> parent
 CMD_HEARTBEAT     = "HEARTBEAT"     # {"cmd":"HEARTBEAT","pc_name":str,"ip":str,"port":int,"status":dict}

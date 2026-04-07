@@ -4,7 +4,7 @@ Runs in a background QThread so it doesn't block the UI.
 """
 import json, socket, threading
 from PyQt5.QtCore import QObject, pyqtSignal
-from shared.protocol import encode, decode, CMD_ADD_TIME, CMD_SET_TIME, CMD_END_SESSION, CMD_GET_STATUS, CMD_SHUTDOWN, CMD_SEND_MESSAGE, RESP_STATUS, RESP_OK, RESP_ERROR
+from shared.protocol import encode, decode, CMD_ADD_TIME, CMD_SET_TIME, CMD_END_SESSION, CMD_GET_STATUS, CMD_SHUTDOWN, CMD_SEND_MESSAGE, CMD_SET_SCHEDULE, RESP_STATUS, RESP_OK, RESP_ERROR
 
 class ChildServer(QObject):
     command_received = pyqtSignal(dict)   # forwarded to main thread
@@ -68,6 +68,19 @@ class ChildServer(QObject):
                         "cmd": CMD_SEND_MESSAGE,
                         "message": msg.get("message", ""),
                         "title": msg.get("title", "Message from Admin")
+                    })
+                    conn.sendall(encode({"type": RESP_OK}))
+
+                elif cmd == CMD_SET_SCHEDULE:
+                    self.command_received.emit({
+                        "cmd": CMD_SET_SCHEDULE,
+                        "enabled": msg.get("enabled", False),
+                        "opening_hours": msg.get("opening_hours", "09:00"),
+                        "closing_hours": msg.get("closing_hours", "23:00"),
+                        "warning_minutes": msg.get("warning_minutes", 30),
+                        "warning_message": msg.get("warning_message", "⚠ Shop is closing soon!"),
+                        "closing_message": msg.get("closing_message", "Sorry, we are now closed!"),
+                        "closing_logo_path": msg.get("closing_logo_path", "")
                     })
                     conn.sendall(encode({"type": RESP_OK}))
 

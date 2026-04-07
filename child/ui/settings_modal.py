@@ -2,6 +2,7 @@
 Child settings modal — password protected, admin only.
 Tabs: Timer Settings | COM Settings | Overlay Settings | Statistics | Admin
 """
+import os
 from PyQt5.QtWidgets import (
     QDialog, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFormLayout, QComboBox,
@@ -44,23 +45,32 @@ class ChildSettingsModal(QDialog):
     timer_add_time   = pyqtSignal(int)   # seconds to add
     timer_stop       = pyqtSignal()
     timer_reset      = pyqtSignal()
+    timer_run        = pyqtSignal()
 
-    def __init__(self, config: dict, db_path: str = "", parent=None):
+    def __init__(self, config: dict, db_path: str = "", app_name: str = "Grefin Timer", parent=None):
         super().__init__(parent)
         self.config  = config.copy()
         self.db_path = db_path
-        self.setWindowTitle("Settings")
+        self.app_name = app_name
+        self.setWindowTitle(f"{app_name} — Settings")
         self.setMinimumSize(1100, 650)  # wider dialog so long labels are shown
         self.setFont(QFont("Segoe UI", 11))
         self.setStyleSheet(STYLE)
+        
+        # Set taskbar logo if available
+        logo_taskbar_path = config.get("logo_taskbar_path", "")
+        if logo_taskbar_path and os.path.exists(logo_taskbar_path):
+            from PyQt5.QtGui import QIcon
+            self.setWindowIcon(QIcon(logo_taskbar_path))
 
         tabs = QTabWidget()
         tabs.setStyleSheet("QTabBar::tab { min-width: 140px; }")
-        tabs.addTab(self._timer_tab(),   "Timer Settings")
-        tabs.addTab(self._com_tab(),     "COM Settings")
-        tabs.addTab(self._overlay_tab(), "Overlay Settings")
-        tabs.addTab(self._stats_tab(),   "Statistics")
-        tabs.addTab(self._admin_tab(),   "Admin")
+        tabs.addTab(self._timer_tab(),    "Timer Settings")
+        tabs.addTab(self._com_tab(),      "COM Settings")
+        tabs.addTab(self._overlay_tab(),  "Overlay Settings")
+        tabs.addTab(self._schedule_tab(), "Schedule")
+        tabs.addTab(self._stats_tab(),    "Statistics")
+        tabs.addTab(self._admin_tab(),    "Admin")
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
@@ -126,6 +136,16 @@ class ChildSettingsModal(QDialog):
         self.parent_port_spin.setValue(self.config.get("parent_port", 9100))
         form.addRow("Parent App Port:", self.parent_port_spin)
 
+        # Voice file for 30 seconds warning
+        self.voice_file_edit = QLineEdit(self.config.get("voice_file_30s", ""))
+        self.voice_file_edit.setPlaceholderText("Path to voice file (e.g. assets/no_more_time.wav)")
+        self.voice_file_btn = QPushButton("Browse...")
+        self.voice_file_btn.clicked.connect(self._pick_voice_file)
+        voice_row = QHBoxLayout()
+        voice_row.addWidget(self.voice_file_edit)
+        voice_row.addWidget(self.voice_file_btn)
+        form.addRow("30s Warning Voice File:", voice_row)
+
         save = QPushButton("Save Timer Settings")
         save.clicked.connect(self._save_timer)
         form.addRow(save)
@@ -153,6 +173,9 @@ class ChildSettingsModal(QDialog):
 
         # Stop / Reset row
         action_row = QHBoxLayout()
+        run_btn = QPushButton("▶  Run Timer")
+        run_btn.setStyleSheet("background:#1a4a1a; color:#7fff7f;")
+        run_btn.clicked.connect(self._on_run_timer)
         stop_btn = QPushButton("⏹  Stop Timer")
         stop_btn.setObjectName("danger")
         stop_btn.setStyleSheet("background:#7b1a1a; color:#ffaaaa;")
@@ -160,6 +183,7 @@ class ChildSettingsModal(QDialog):
         reset_btn = QPushButton("↺  Reset Timer")
         reset_btn.setStyleSheet("background:#3a2a00; color:#ffd080;")
         reset_btn.clicked.connect(self._on_reset_timer)
+        action_row.addWidget(run_btn)
         action_row.addWidget(stop_btn)
         action_row.addWidget(reset_btn)
         action_row.addStretch()
@@ -173,6 +197,11 @@ class ChildSettingsModal(QDialog):
         if color.isValid():
             self._timer_color = color.name()
             self._update_color_preview()
+
+    def _pick_voice_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Voice File", "", "Audio Files (*.wav *.mp3)")
+        if file_path:
+            self.voice_file_edit.setText(file_path)
 
     def _pick_shop_color(self):
         current_color = QColor(self.shop_color_edit.text()) if self.shop_color_edit.text() else QColor("#00e5ff")
@@ -192,6 +221,7 @@ class ChildSettingsModal(QDialog):
         self.config["standalone"]       = self.standalone_check.isChecked()
         self.config["parent_ip"]        = self.parent_ip_edit.text().strip()
         self.config["parent_port"]      = self.parent_port_spin.value()
+        self.config["voice_file_30s"]   = self.voice_file_edit.text().strip()
         self.settings_saved.emit(self.config)
 
     def _on_add_time(self):
@@ -200,12 +230,16 @@ class ChildSettingsModal(QDialog):
         if seconds > 0:
             self.timer_add_time.emit(seconds)
 
+    def _on_run_timer(self):
+        self.timer_run.emit()
+
     def _on_stop_timer(self):
+        # Keep settings open while stopping the timer session
         self.timer_stop.emit()
 
     def _on_reset_timer(self):
-        self.timer_reset.emit()
         self.close()
+        self.timer_reset.emit()
 
     # ── COM Settings ─────────────────────────────────────────────
     def _com_tab(self):
@@ -389,6 +423,104 @@ class ChildSettingsModal(QDialog):
         self.bg_edit.setVisible(visible)
         self.bg_btn.setVisible(visible)
 
+    # ── Schedule Settings ────────────────────────────────────────
+    def _schedule_tab(self):
+        tab = QWidget()
+        form = QFormLayout(tab)
+        self._init_form_layout(form)
+
+        # Enable/disable schedule
+        self.schedule_check = QCheckBox("Enable shop schedule")
+        self.schedule_check.setChecked(self.config.get("schedule_enabled", False))
+        form.addRow(self.schedule_check)
+
+        # Opening hours
+        self.opening_time_edit = QTimeEdit()
+        self.opening_time_edit.setDisplayFormat("HH:mm")
+        opening_time_str = self.config.get("opening_hours", "09:00")
+        try:
+            opening_time = QTime.fromString(opening_time_str, "HH:mm")
+            self.opening_time_edit.setTime(opening_time)
+        except Exception:
+            self.opening_time_edit.setTime(QTime(9, 0))
+        self.opening_time_edit.setToolTip("Time when the shop opens")
+        form.addRow("Opening Hours:", self.opening_time_edit)
+
+        # Closing hours
+        self.closing_time_edit = QTimeEdit()
+        self.closing_time_edit.setDisplayFormat("HH:mm")
+        closing_time_str = self.config.get("closing_hours", "23:00")
+        try:
+            closing_time = QTime.fromString(closing_time_str, "HH:mm")
+            self.closing_time_edit.setTime(closing_time)
+        except Exception:
+            self.closing_time_edit.setTime(QTime(23, 0))
+        self.closing_time_edit.setToolTip("Time when the shop closes")
+        form.addRow("Closing Hours:", self.closing_time_edit)
+
+        # Warning time (minutes before closing)
+        warning_time_str = self.config.get("warning_time", "30:00")
+        try:
+            warn_parts = warning_time_str.split(":")
+            warn_minutes = int(warn_parts[0]) if warn_parts else 30
+        except Exception:
+            warn_minutes = 30
+
+        self.warning_time_spin = QSpinBox()
+        self.warning_time_spin.setRange(1, 1440)  # 1 minute to 24 hours
+        self.warning_time_spin.setValue(warn_minutes)
+        self.warning_time_spin.setSuffix(" minutes before closing")
+        self.warning_time_spin.setToolTip("Show warning message this many minutes before closing")
+        form.addRow("Warning Time:", self.warning_time_spin)
+
+        # Warning message
+        self.warning_msg_edit = QLineEdit(self.config.get("warning_message", "⚠ Shop is closing soon!"))
+        self.warning_msg_edit.setPlaceholderText("Enter warning message to display")
+        self.warning_msg_edit.setToolTip("This message will be displayed prominently when the shop is about to close")
+        form.addRow("Warning Message:", self.warning_msg_edit)
+
+        # Closing message
+        self.closing_msg_edit = QLineEdit(self.config.get("closing_message", "Sorry, we are now closed!"))
+        self.closing_msg_edit.setPlaceholderText("e.g. Sorry, we are now closed!")
+        self.closing_msg_edit.setToolTip(
+            "Shown on the overlay and in the COM line when the shop is closed by schedule."
+        )
+        form.addRow("Overlay / COM message (when closed):", self.closing_msg_edit)
+
+        # Closing logo path
+        closing_logo_layout = QHBoxLayout()
+        self.closing_logo_edit = QLineEdit(self.config.get("closing_logo_path", ""))
+        self.closing_logo_edit.setPlaceholderText("Default: assets/closing_logo.jpg")
+        self.closing_logo_btn = QPushButton("Browse...")
+        self.closing_logo_btn.clicked.connect(self._browse_closing_logo)
+        closing_logo_layout.addWidget(self.closing_logo_edit)
+        closing_logo_layout.addWidget(self.closing_logo_btn)
+        form.addRow("Closing image (center / GIF slot when closed):", closing_logo_layout)
+
+        save = QPushButton("Save Schedule Settings")
+        save.clicked.connect(self._save_schedule)
+        form.addRow(save)
+        return tab
+
+    def _save_schedule(self):
+        self.config["schedule_enabled"] = self.schedule_check.isChecked()
+        self.config["opening_hours"] = self.opening_time_edit.time().toString("HH:mm")
+        self.config["closing_hours"] = self.closing_time_edit.time().toString("HH:mm")
+        self.config["warning_time"] = f"{self.warning_time_spin.value()}:00"
+        self.config["warning_message"] = self.warning_msg_edit.text().strip()
+        self.config["closing_message"] = self.closing_msg_edit.text().strip()
+        self.config["closing_logo_path"] = self.closing_logo_edit.text().strip()
+        self.settings_saved.emit(self.config)
+
+    def _browse_closing_logo(self):
+        import os
+        default_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'assets')
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Closing Logo", default_dir,
+            "Image files (*.png *.jpg *.jpeg *.bmp);;All files (*)")
+        if file_path:
+            self.closing_logo_edit.setText(file_path)
+
     # ── Statistics ───────────────────────────────────────────────
     def _stats_tab(self):
         tab = QWidget()
@@ -413,9 +545,9 @@ class ChildSettingsModal(QDialog):
         user_label.setStyleSheet("color:#00e5ff;")
         layout.addWidget(user_label)
 
-        self.session_table = QTableWidget(0, 5)
+        self.session_table = QTableWidget(0, 6)
         self.session_table.setHorizontalHeaderLabels(
-            ["Username", "PC", "Started", "Ended", "Seconds"])
+            ["Username", "PC", "Started", "Ended", "Seconds", "Remaining (saved)"])
         self.session_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.session_table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.session_table)
@@ -429,7 +561,6 @@ class ChildSettingsModal(QDialog):
 
     def _load_stats(self):
         from shared.db import get_coin_logs, get_conn
-        import os
 
         # Coin logs
         logs = get_coin_logs(self.config.get("pc_name"), path=self.db_path)
@@ -438,17 +569,30 @@ class ChildSettingsModal(QDialog):
             for j, v in enumerate([r["timestamp"], r["pc_name"], r.get("detail", "")]):
                 self.coin_table.setItem(i, j, QTableWidgetItem(str(v)))
 
-        # Sessions
+        # Sessions — join with users table to get saved_seconds (remaining bank)
         conn = get_conn(self.db_path)
         rows = conn.execute(
-            "SELECT username, pc_name, started_at, ended_at, total_seconds FROM sessions "
-            "WHERE pc_name=? ORDER BY started_at DESC LIMIT 100",
+            """SELECT s.username, s.pc_name, s.started_at, s.ended_at, s.total_seconds,
+                      COALESCE(u.saved_seconds, 0) AS saved_seconds
+               FROM sessions s
+               LEFT JOIN users u ON s.username = u.username
+               WHERE s.pc_name=?
+               ORDER BY s.started_at DESC LIMIT 100""",
             (self.config.get("pc_name", ""),)
         ).fetchall()
         conn.close()
         self.session_table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            for j, v in enumerate([r[0] or "guest", r[1], r[2], r[3] or "-", str(r[4])]):
+            username    = r[0] or "guest"
+            pc          = r[1]
+            started     = r[2]
+            ended       = r[3] or "-"
+            total_sec   = r[4]
+            saved_sec   = r[5]
+            # Format saved seconds as HH:MM:SS
+            h = saved_sec // 3600; m = (saved_sec % 3600) // 60; s = saved_sec % 60
+            saved_str = f"{h:02d}:{m:02d}:{s:02d}" if username != "guest" else "-"
+            for j, v in enumerate([username, pc, started, ended, str(total_sec), saved_str]):
                 self.session_table.setItem(i, j, QTableWidgetItem(str(v)))
 
     # ── Admin ────────────────────────────────────────────────────

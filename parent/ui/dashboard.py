@@ -11,7 +11,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 
 from shared.db import get_pcs, upsert_pc, delete_pc, get_sales_summary, get_activity_logs
-from shared.db import register_user, login_user, get_user, save_user_time, consume_user_time
+from shared.db import register_user, login_user, get_user, save_user_time, set_user_time, delete_user, get_all_users
 from parent import client
 
 REFRESH_MS = 5000  # poll every 5 seconds
@@ -79,25 +79,6 @@ class AddEditPCDialog(QDialog):
         self.port_spin.setValue(pc["port"] if pc else 9000)
 
         form.addRow("PC Name:", self.name_edit)
-        form.addRow("IP Address:", self.ip_edit)
-        form.addRow("Port:", self.port_spin)
-
-        btns = QHBoxLayout()
-        ok_btn = QPushButton("Save")
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        btns.addWidget(ok_btn)
-        btns.addWidget(cancel_btn)
-        form.addRow(btns)
-
-    def get_data(self) -> dict:
-        return {"name": self.name_edit.text().strip(),
-                "ip":   self.ip_edit.text().strip(),
-                "port": self.port_spin.value()}
-
-
-# ── PC status colors ─────────────────────────────────────────
         form.addRow("IP Address:", self.ip_edit)
         form.addRow("Port:", self.port_spin)
 
@@ -196,8 +177,19 @@ class PCRow:
 class DashboardWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PC Cafe — Admin Dashboard")
+        self.setWindowTitle("Grefin Timer — Admin Dashboard")
         self.setMinimumSize(1400, 700)  # Made wider to fit all settings
+        
+        # Try to set taskbar logo
+        try:
+            import os
+            logo_taskbar_path = os.path.join(os.path.dirname(__file__), '..', '..', 'assets', 'logo_taskbar.png')
+            if os.path.exists(logo_taskbar_path):
+                from PyQt5.QtGui import QIcon
+                self.setWindowIcon(QIcon(logo_taskbar_path))
+        except Exception:
+            pass
+        
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #0d0d1a; color: #eee; }
             QTabWidget::pane { border: 1px solid #333; }
@@ -323,13 +315,15 @@ class DashboardWindow(QMainWindow):
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
-        # Users table
-        self.users_table = QTableWidget(0, 5)
-        self.users_table.setHorizontalHeaderLabels(["Username", "Saved Time", "Saved on PC", "Created", "Last Login"])
+        # Users table — 6 columns including remaining saved time
+        self.users_table = QTableWidget(0, 6)
+        self.users_table.setHorizontalHeaderLabels(
+            ["Username", "Saved Time (HH:MM:SS)", "Saved Seconds", "Saved on PC", "Created", "Last Login"])
         self.users_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.users_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.users_table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.users_table)
+        self._load_users()
         return w
 
     def _settings_tab(self):
@@ -350,6 +344,56 @@ class DashboardWindow(QMainWindow):
         general_form.addRow("Admin Password:", self.admin_password_edit)
 
         layout.addWidget(general_group)
+
+        # Schedule Settings
+        schedule_group = QGroupBox("Schedule Settings (Apply to All PCs)")
+        schedule_form = QFormLayout(schedule_group)
+
+        self.schedule_enabled_check = QCheckBox("Enable shop schedule for all PCs")
+        self.schedule_enabled_check.setChecked(self._get_config("schedule_enabled", False))
+        schedule_form.addRow(self.schedule_enabled_check)
+
+        self.opening_time_edit = QLineEdit()
+        self.opening_time_edit.setText(self._get_config("opening_hours", "09:00"))
+        self.opening_time_edit.setPlaceholderText("HH:MM")
+        schedule_form.addRow("Opening Hours:", self.opening_time_edit)
+
+        self.closing_time_edit = QLineEdit()
+        self.closing_time_edit.setText(self._get_config("closing_hours", "23:00"))
+        self.closing_time_edit.setPlaceholderText("HH:MM")
+        schedule_form.addRow("Closing Hours:", self.closing_time_edit)
+
+        self.warning_minutes_spin = QSpinBox()
+        self.warning_minutes_spin.setRange(1, 1440)
+        warning_time_str = self._get_config("warning_time", "30:00")
+        try:
+            warning_minutes = int(warning_time_str.split(":")[0])
+        except Exception:
+            warning_minutes = 30
+        self.warning_minutes_spin.setValue(warning_minutes)
+        self.warning_minutes_spin.setSuffix(" minutes")
+        schedule_form.addRow("Warning Time:", self.warning_minutes_spin)
+
+        self.warning_msg_edit = QLineEdit()
+        self.warning_msg_edit.setText(self._get_config("warning_message", "⚠ Shop is closing soon!"))
+        self.warning_msg_edit.setPlaceholderText("Enter warning message")
+        schedule_form.addRow("Warning Message:", self.warning_msg_edit)
+
+        self.closing_msg_edit = QLineEdit()
+        self.closing_msg_edit.setText(self._get_config("closing_message", "Sorry, we are now closed!"))
+        self.closing_msg_edit.setPlaceholderText("Enter closing message")
+        schedule_form.addRow("Closing Message:", self.closing_msg_edit)
+
+        self.closing_logo_edit = QLineEdit()
+        self.closing_logo_edit.setText(self._get_config("closing_logo_path", ""))
+        self.closing_logo_edit.setPlaceholderText("Path to closing logo")
+        schedule_form.addRow("Closing Logo Path:", self.closing_logo_edit)
+
+        apply_schedule_btn = QPushButton("Apply Schedule to All PCs")
+        apply_schedule_btn.clicked.connect(self._apply_schedule_to_all)
+        schedule_form.addRow(apply_schedule_btn)
+
+        layout.addWidget(schedule_group)
 
         # Database Settings
         db_group = QGroupBox("Database Settings")
@@ -499,9 +543,19 @@ class DashboardWindow(QMainWindow):
 
     # ── User Management ──────────────────────────────────────────
     def _load_users(self):
-        # This would need to be implemented in the database module
-        # For now, just clear the table
-        self.users_table.setRowCount(0)
+        users = get_all_users()
+        self.users_table.setRowCount(len(users))
+        for i, u in enumerate(users):
+            sec = u["saved_seconds"]
+            h = sec // 3600; m = (sec % 3600) // 60; s = sec % 60
+            time_str = f"{h:02d}:{m:02d}:{s:02d}"
+            for j, v in enumerate([
+                u["username"], time_str, str(sec),
+                u.get("saved_on_pc") or "-",
+                u.get("created_at") or "-",
+                u.get("last_login") or "-",
+            ]):
+                self.users_table.setItem(i, j, QTableWidgetItem(str(v)))
 
     def _add_user(self):
         dlg = AddEditUserDialog(parent=self)
@@ -511,13 +565,15 @@ class DashboardWindow(QMainWindow):
                 success, msg = register_user(data["username"], data["password"])
                 if success:
                     if data["saved_seconds"] > 0:
-                        save_user_time(data["username"], data["saved_seconds"], "")
+                        set_user_time(data["username"], data["saved_seconds"], "")
                     self._load_users()
+                    QMessageBox.information(self, "User Added", f"User '{data['username']}' created.")
                 else:
                     QMessageBox.warning(self, "Error", msg)
+            else:
+                QMessageBox.warning(self, "Validation", "Username and password are required.")
 
     def _edit_user(self):
-        # Get selected user
         rows = self.users_table.selectedItems()
         if not rows:
             QMessageBox.information(self, "Select User", "Please select a user first.")
@@ -527,13 +583,14 @@ class DashboardWindow(QMainWindow):
         user = get_user(username)
         if not user:
             return
-
         dlg = AddEditUserDialog(user, parent=self)
         if dlg.exec_() == QDialog.Accepted:
             data = dlg.get_data()
-            if data["saved_seconds"] != user["saved_seconds"]:
-                save_user_time(data["username"], data["saved_seconds"], user.get("saved_on_pc", ""))
+            # Admin directly sets the saved time (not additive)
+            set_user_time(data["username"], data["saved_seconds"],
+                          user.get("saved_on_pc", ""))
             self._load_users()
+            QMessageBox.information(self, "Updated", f"User '{data['username']}' updated.")
 
     def _delete_user(self):
         rows = self.users_table.selectedItems()
@@ -542,11 +599,12 @@ class DashboardWindow(QMainWindow):
             return
         idx = self.users_table.currentRow()
         username = self.users_table.item(idx, 0).text()
-
-        if QMessageBox.question(self, "Delete User", f"Delete user '{username}'?") == QMessageBox.Yes:
-            # This would need to be implemented in the database module
-            # For now, just show a message
-            QMessageBox.information(self, "Not Implemented", "User deletion not yet implemented.")
+        if QMessageBox.question(self, "Delete User",
+                                f"Delete user '{username}'? This cannot be undone.",
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            delete_user(username)
+            self._load_users()
+            QMessageBox.information(self, "Deleted", f"User '{username}' deleted.")
 
     # ── Settings ─────────────────────────────────────────────────
     def _get_config(self, key, default=None):
@@ -616,6 +674,75 @@ class DashboardWindow(QMainWindow):
                     QMessageBox.warning(self, "Error", f"Failed to shutdown: {result.get('error')}")
             except Exception as e:
                 QMessageBox.warning(self, "Error", str(e))
+
+    def _apply_schedule_to_all(self):
+        """Send schedule configuration to all connected PCs."""
+        try:
+            # Validate time format
+            opening = self.opening_time_edit.text().strip()
+            closing = self.closing_time_edit.text().strip()
+            
+            if not opening or not closing:
+                QMessageBox.warning(self, "Validation Error", "Please enter both opening and closing times.")
+                return
+            
+            # Try to parse times to validate format
+            try:
+                h, m = map(int, opening.split(":"))
+                if not (0 <= h <= 23 and 0 <= m <= 59):
+                    raise ValueError("Invalid opening time")
+            except Exception:
+                QMessageBox.warning(self, "Validation Error", "Opening time must be in HH:MM format (00:00-23:59).")
+                return
+            
+            try:
+                h, m = map(int, closing.split(":"))
+                if not (0 <= h <= 23 and 0 <= m <= 59):
+                    raise ValueError("Invalid closing time")
+            except Exception:
+                QMessageBox.warning(self, "Validation Error", "Closing time must be in HH:MM format (00:00-23:59).")
+                return
+            
+            warning_msg = self.warning_msg_edit.text().strip()
+            if not warning_msg:
+                QMessageBox.warning(self, "Validation Error", "Please enter a warning message.")
+                return
+            
+            closing_msg = self.closing_msg_edit.text().strip()
+            closing_logo = self.closing_logo_edit.text().strip()
+            
+            enabled = self.schedule_enabled_check.isChecked()
+            warning_minutes = self.warning_minutes_spin.value()
+            
+            # Send to all PCs
+            success_count = 0
+            failure_count = 0
+            
+            for pc_row in self.pc_rows:
+                try:
+                    result = client.set_schedule(
+                        pc_row.ip, pc_row.port,
+                        enabled=enabled,
+                        opening_hours=opening,
+                        closing_hours=closing,
+                        warning_minutes=warning_minutes,
+                        warning_message=warning_msg,
+                        closing_message=closing_msg,
+                        closing_logo_path=closing_logo
+                    )
+                    if "error" not in result:
+                        success_count += 1
+                    else:
+                        failure_count += 1
+                except Exception:
+                    failure_count += 1
+            
+            msg = f"Schedule applied:\nSuccess: {success_count}\nFailed: {failure_count}"
+            QMessageBox.information(self, "Schedule Update Complete", msg)
+        
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to apply schedule: {str(e)}")
+
     def _load_stats(self):
         rows = get_sales_summary()
         self.stats_table.setRowCount(len(rows))

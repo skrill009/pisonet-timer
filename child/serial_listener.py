@@ -9,6 +9,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 class SerialListener(QObject):
     coin_inserted = pyqtSignal(int)   # emits pulse count
     status_changed = pyqtSignal(str, bool)  # status text, is_ok
+    coin_rejected = pyqtSignal(str)   # emits rejection reason
 
     def __init__(self, port: str, baud: int = 9600, mode: str = "Auto", parent=None):
         super().__init__(parent)
@@ -17,6 +18,7 @@ class SerialListener(QObject):
         self.mode = mode  # Auto, Vout, Vin
         self._running = False
         self._thread = threading.Thread(target=self._listen, daemon=True)
+        self._timer_manager = None  # Set via set_timer_manager()
 
     def start(self):
         self._running = True
@@ -24,6 +26,10 @@ class SerialListener(QObject):
 
     def stop(self):
         self._running = False
+
+    def set_timer_manager(self, timer_manager):
+        """Set the timer manager reference for shop status checks."""
+        self._timer_manager = timer_manager
 
     def _listen(self):
         try:
@@ -68,7 +74,12 @@ class SerialListener(QObject):
                     if pulses is None:
                         continue
 
-                    self.coin_inserted.emit(pulses)
+                    # Check if shop is open before accepting coins
+                    if self._timer_manager and not self._timer_manager.is_shop_open():
+                        warning_msg = self._timer_manager.get_warning_message_with_time()
+                        self.coin_rejected.emit(warning_msg)
+                    else:
+                        self.coin_inserted.emit(pulses)
         except Exception as e:
             print(f"[SerialListener] Error: {e}")
             self.status_changed.emit(f"Error: {e}", False)

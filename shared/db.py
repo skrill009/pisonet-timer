@@ -92,7 +92,17 @@ def login_user(username: str, password: str, path=DB_PATH) -> tuple[bool, dict |
     return False, None
 
 def save_user_time(username: str, seconds: int, pc_name: str, path=DB_PATH):
-    """Save remaining time for a user and record which PC it was saved on."""
+    """Add seconds to a user's saved bank (additive). Records which PC last saved."""
+    conn = get_conn(path)
+    conn.execute(
+        "UPDATE users SET saved_seconds = saved_seconds + ?, saved_on_pc=? WHERE username=?",
+        (seconds, pc_name, username)
+    )
+    conn.commit()
+    conn.close()
+
+def set_user_time(username: str, seconds: int, pc_name: str, path=DB_PATH):
+    """Directly SET a user's saved time (admin override — not additive)."""
     conn = get_conn(path)
     conn.execute(
         "UPDATE users SET saved_seconds=?, saved_on_pc=? WHERE username=?",
@@ -100,6 +110,22 @@ def save_user_time(username: str, seconds: int, pc_name: str, path=DB_PATH):
     )
     conn.commit()
     conn.close()
+
+def delete_user(username: str, path=DB_PATH):
+    """Delete a user account."""
+    conn = get_conn(path)
+    conn.execute("DELETE FROM users WHERE username=?", (username,))
+    conn.commit()
+    conn.close()
+
+def get_all_users(path=DB_PATH) -> list:
+    """Return all users with their saved time."""
+    conn = get_conn(path)
+    rows = conn.execute(
+        "SELECT username, saved_seconds, saved_on_pc, created_at, last_login FROM users ORDER BY username"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 def consume_user_time(username: str, pc_name: str, path=DB_PATH) -> int:
     """
